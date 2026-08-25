@@ -18,13 +18,12 @@ jobs:
         run: pip install -q kaggle
 
       - name: Check and restart kernel
-        id: check
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
           KERNEL_REF: "ojwojtek/mc-server-code"
         run: |
           python3 << 'PYEOF'
-          import subprocess, os, sys, tempfile, shutil
+          import subprocess, os, sys, tempfile, shutil, time
           from datetime import datetime, timezone
 
           KERNEL = os.environ["KERNEL_REF"]
@@ -35,59 +34,41 @@ jobs:
               return subprocess.run(c, capture_output=True, text=True, env=ENV)
 
           now = datetime.now(timezone.utc)
-
-          # Check status
           r = cmd(["kaggle", "kernels", "status", KERNEL])
           status = r.stdout.strip().lower()
           print(f"[{now.strftime('%H:%M')}] Status: {status}")
 
           if "running" in status:
-              print("RESULT:already_running")
-              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-                  f.write("result=already_running\n")
+              print("Already running — OK")
               sys.exit(0)
 
-          # Not running — restart
           print(f"Not running ({status}), restarting...")
           d = tempfile.mkdtemp()
           try:
+              # Pull latest version
               r = cmd(["kaggle", "kernels", "pull", "-p", d, "-m", KERNEL])
               if r.returncode != 0:
-                  err = r.stderr[:200]
-                  print(f"Pull failed: {err}")
-                  with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-                      f.write(f"result=failed\nreason=pull: {err}\n")
-                  sys.exit(1)
+                  print(f"Pull failed: {r.stderr[:300]}"); sys.exit(1)
 
+              # Push with run flag
               r = cmd(["kaggle", "kernels", "push", "-p", d])
               if r.returncode != 0:
-                  err = r.stderr[:200]
-                  print(f"Push failed: {err}")
-                  with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-                      f.write(f"result=failed\nreason=push: {err}\n")
-                  sys.exit(1)
+                  print(f"Push failed: {r.stderr[:300]}"); sys.exit(1)
+              print(f"Pushed: {r.stdout.strip()}")
 
-              print(f"Restarted: {r.stdout.strip()}")
-              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-                  f.write("result=restarted\nreason=\n")
+              # Wait for session to start
+              print("Waiting for session to start...")
+              for i in range(12):
+                  time.sleep(5)
+                  r = cmd(["kaggle", "kernels", "status", KERNEL])
+                  s = r.stdout.strip().lower()
+                  print(f"  [{i*5}s] {s}")
+                  if "running" in s:
+                      print("Session is running!")
+                      sys.exit(0)
+
+              print("Session did not start within 60s")
+              sys.exit(1)
           finally:
               shutil.rmtree(d, ignore_errors=True)
           PYEOF
-
-      - name: Notify on restart
-        if: steps.check.outputs.result == 'restarted'
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: |
-          curl -s -H "Content-Type: application/json" \
-            -d "{\"content\": \"🟢 **MC Server restarted** — was down, now back up. $(date -u +%H:%M) UTC\"}" \
-            "$DISCORD_WEBHOOK"
-
-      - name: Notify on failure
-        if: failure()
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: |
-          curl -s -H "Content-Type: application/json" \
-            -d "{\"content\": \"🔴 **MC Server keepalive FAILED** — could not restart! Reason: ${{ steps.check.outputs.reason }} — $(date -u +%H:%M) UTC\"}" \
-            "$DISCORD_WEBHOOK"
