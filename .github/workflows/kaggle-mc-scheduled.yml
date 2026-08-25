@@ -1,24 +1,20 @@
-name: auto restart server
+name: Kaggle MC Scheduled Server
 
 on:
   schedule:
-    # Fire at EXACTLY midnight and noon UTC, every day, forever
-    - cron: '0 0 * * *'    # 00:00 UTC
-    - cron: '0 12 * * *'   # 12:00 UTC
-    # Safety net: check every 30 min in case a scheduled run was missed
+    - cron: '0 0 * * *'
+    - cron: '0 12 * * *'
     - cron: '*/30 * * * *'
   workflow_dispatch:
 
 env:
-  KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-  KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-  PLAYIT_AUTH_TOKEN: ${{ secrets.PLAYIT_AUTH_TOKEN }}
+  KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
   MINECRAFT_VERSION: "1.21.1"
   SERVER_MOTD: "Martin Kaggle MC Server"
   MAX_PLAYERS: "20"
-  DATASET_SLUG: "${{ secrets.KAGGLE_USERNAME }}/mc-server-full-backup"
+  DATASET_SLUG: "system.pliki/mc-server-full-backup"
   NOTEBOOK_SLUG: "mc-server-scheduled"
-  BOOT_WINDOW_SECONDS: "900"  # 15 min: if session started within this window, skip
+  BOOT_WINDOW_SECONDS: "900"
 
 jobs:
   scheduled-start:
