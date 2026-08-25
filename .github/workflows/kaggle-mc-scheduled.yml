@@ -1,0 +1,33 @@
+name: auto restart server
+
+on:
+  schedule:
+    # Fire at EXACTLY midnight and noon UTC, every day, forever
+    - cron: '0 0 * * *'    # 00:00 UTC
+    - cron: '0 12 * * *'   # 12:00 UTC
+    # Safety net: check every 30 min in case a scheduled run was missed
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+env:
+  KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+  KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+  PLAYIT_AUTH_TOKEN: ${{ secrets.PLAYIT_AUTH_TOKEN }}
+  MINECRAFT_VERSION: "1.21.1"
+  SERVER_MOTD: "Martin Kaggle MC Server"
+  MAX_PLAYERS: "20"
+  DATASET_SLUG: "${{ secrets.KAGGLE_USERNAME }}/mc-server-full-backup"
+  NOTEBOOK_SLUG: "mc-server-scheduled"
+  BOOT_WINDOW_SECONDS: "900"  # 15 min: if session started within this window, skip
+
+jobs:
+  scheduled-start:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install requests
+      - name: Anchor-aligned session manager
+        run: python .github/scripts/scheduled_keepalive.py
