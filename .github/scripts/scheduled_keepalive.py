@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 API_TOKEN = os.environ["KAGGLE_API_TOKEN"]
 NOTEBOOK_SLUG = os.environ.get("NOTEBOOK_SLUG", "mc-server-scheduled")
-DATASET_SLUG = os.environ.get("DATASET_SLUG", "system.pliki/mc-server-full-backup")
+DATASET_SLUG = os.environ.get("DATASET_SLUG", "ojwojtek/mc-server-full-backup")
 BOOT_WINDOW = int(os.environ.get("BOOT_WINDOW_SECONDS", "900"))
 USERNAME = DATASET_SLUG.split("/")[0] if "/" in DATASET_SLUG else "user"
 
