@@ -1,23 +1,35 @@
 #!/usr/bin/env python3
 """
-Wall-clock anchored Kaggle MC server with auto-cleanup.
-Uses the CORRECT /api/v1/kernels/push endpoint.
+Wall-clock anchored Kaggle MC server.
+Uses KAGGLE_API_TOKEN (bearer token) for authentication.
+Endpoint: POST /api/v1/kernels/push
 """
 
 import os, sys, json, time, textwrap, requests, tempfile, shutil
 from datetime import datetime, timezone
 
-USERNAME = os.environ["KAGGLE_USERNAME"]
-KEY = os.environ["KAGGLE_KEY"]
-AUTH = (USERNAME, KEY)
+API_TOKEN = os.environ["KAGGLE_API_TOKEN"]
 BASE = "https://www.kaggle.com/api/v1"
 NOTEBOOK_SLUG = os.environ.get("NOTEBOOK_SLUG", "mc-server-scheduled")
-DATASET_SLUG = os.environ.get("DATASET_SLUG", f"{USERNAME}/mc-server-full-backup")
+DATASET_SLUG = os.environ.get("DATASET_SLUG", "system.pliki/mc-server-full-backup")
 BOOT_WINDOW = int(os.environ.get("BOOT_WINDOW_SECONDS", "900"))
 
+# Extract username from dataset slug for kernel ID
+USERNAME = DATASET_SLUG.split("/")[0] if "/" in DATASET_SLUG else "user"
 
-def api(method, endpoint, **kwargs):
-    resp = requests.request(method, f"{BASE}/{endpoint}", auth=AUTH, timeout=120, **kwargs)
+# Bearer token auth headers
+HEADERS = {
+    "Authorization": f"Bearer {API_TOKEN}",
+}
+
+
+def api_get(endpoint, **kwargs):
+    resp = requests.get(f"{BASE}/{endpoint}", headers=HEADERS, timeout=60, **kwargs)
+    return resp
+
+
+def api_delete(endpoint, **kwargs):
+    resp = requests.delete(f"{BASE}/{endpoint}", headers=HEADERS, timeout=60, **kwargs)
     return resp
 
 
@@ -33,12 +45,17 @@ def get_current_anchor():
 
 def get_latest_session():
     try:
-        resp = api("GET", "kernels/list", params={
+        resp = api_get("kernels/list", params={
             "user": USERNAME, "page": 1, "pageSize": 10, "sortBy": "dateCreated"
         })
         if resp.status_code != 200:
+            print(f"⚠️  List returned {resp.status_code}: {resp.text[:200]}")
             return None, None, None
-        for k in resp.json().get("kernels", []):
+        data = resp.json()
+        kernels = data.get("kernels", data) if isinstance(data, dict) else data
+        if not isinstance(kernels, list):
+            kernels = []
+        for k in kernels:
             slug = k.get("slug", "")
             title = k.get("title", "").lower().replace(" ", "-")
             if NOTEBOOK_SLUG in slug or NOTEBOOK_SLUG in title:
@@ -60,12 +77,15 @@ def get_latest_session():
 
 def cleanup_old_sessions(keep=2):
     try:
-        resp = api("GET", "kernels/list", params={
+        resp = api_get("kernels/list", params={
             "user": USERNAME, "page": 1, "pageSize": 50, "sortBy": "dateCreated"
         })
         if resp.status_code != 200:
             return
-        kernels = resp.json().get("kernels", [])
+        data = resp.json()
+        kernels = data.get("kernels", data) if isinstance(data, dict) else data
+        if not isinstance(kernels, list):
+            kernels = []
         matching = [
             k for k in kernels
             if NOTEBOOK_SLUG in k.get("slug", "")
@@ -75,10 +95,10 @@ def cleanup_old_sessions(keep=2):
         for k in to_delete:
             ref = k.get("ref")
             try:
-                api("DELETE", f"kernels/delete/{ref}")
-                print(f"  🗑️  Deleted old session: {k.get('title')}")
+                api_delete(f"kernels/delete/{ref}")
+                print(f"  🗑️  Deleted: {k.get('title')}")
             except Exception as e:
-                print(f"  ⚠️  Failed to delete {ref}: {e}")
+                print(f"  ⚠️  Delete failed {ref}: {e}")
         if to_delete:
             print(f"  Cleaned up {len(to_delete)} old sessions, kept {keep}")
     except Exception as e:
@@ -86,12 +106,10 @@ def cleanup_old_sessions(keep=2):
 
 
 def build_server_code():
-    """Return the full Python code that runs inside the Kaggle notebook."""
     env_lines = "\n".join([
         f'os.environ["{k}"] = "{v}"'
         for k, v in {
-            "KAGGLE_USERNAME": USERNAME,
-            "KAGGLE_KEY": KEY,
+            "KAGGLE_API_TOKEN": API_TOKEN,
             "PLAYIT_AUTH_TOKEN": os.environ.get("PLAYIT_AUTH_TOKEN", ""),
             "MINECRAFT_VERSION": os.environ.get("MINECRAFT_VERSION", "1.21.1"),
             "SERVER_MOTD": os.environ.get("SERVER_MOTD", "Martin Kaggle MC Server"),
@@ -107,8 +125,10 @@ subprocess.run([sys.executable,"-m","pip","install","-q","--upgrade","kaggle"],c
 subprocess.run(["apt-get","update","-qq"],capture_output=True)
 subprocess.run(["apt-get","install","-y","-qq","unzip","curl","jq"],capture_output=True,env={**os.environ,"DEBIAN_FRONTEND":"noninteractive"})
 
+# Write API token for kaggle CLI inside notebook
 kd=pathlib.Path.home()/".kaggle";kd.mkdir(parents=True,exist_ok=True)
-(kd/"kaggle.json").write_text(json.dumps({"username":os.environ["KAGGLE_USERNAME"],"key":os.environ["KAGGLE_KEY"]}));(kd/"kaggle.json").chmod(0o600)
+(kd/"access_token").write_text(os.environ["KAGGLE_API_TOKEN"])
+(kd/"access_token").chmod(0o600)
 
 SYNC_DAEMON=r"""
 import os,time,shutil,subprocess,json,pathlib,fcntl,signal,sys
@@ -306,15 +326,9 @@ while True:
 
 
 def create_session(anchor_label):
-    """
-    Uses the CORRECT Kaggle API: POST /api/v1/kernels/push
-    This requires writing a temporary folder with kernel-metadata.json + .ipynb
-    then calling the push endpoint, exactly like `kaggle kernels push` does.
-    """
     ts = anchor_label
     kernel_id = f"{USERNAME}/{NOTEBOOK_SLUG}-{ts}"
 
-    # Build notebook JSON
     code = build_server_code()
     notebook = {
         "cells": [{"cell_type": "code", "execution_count": None, "metadata": {},
@@ -325,7 +339,6 @@ def create_session(anchor_label):
         "nbformat": 4, "nbformat_minor": 5
     }
 
-    # kernel-metadata.json (required by /kernels/push)
     metadata = {
         "id": kernel_id,
         "title": f"{NOTEBOOK_SLUG}-{ts}",
@@ -340,7 +353,6 @@ def create_session(anchor_label):
         "competition_sources": []
     }
 
-    # Write to temp directory and push via API
     tmpdir = tempfile.mkdtemp()
     try:
         nb_path = os.path.join(tmpdir, f"{NOTEBOOK_SLUG}.ipynb")
@@ -351,7 +363,6 @@ def create_session(anchor_label):
         with open(meta_path, "w") as f:
             json.dump(metadata, f)
 
-        # Push using multipart form data (same as kaggle CLI)
         with open(nb_path, "rb") as nb_file, open(meta_path, "rb") as meta_file:
             files = {
                 "file": (f"{NOTEBOOK_SLUG}.ipynb", nb_file, "application/json"),
@@ -359,7 +370,7 @@ def create_session(anchor_label):
             }
             resp = requests.post(
                 f"{BASE}/kernels/push",
-                auth=AUTH,
+                headers={"Authorization": f"Bearer {API_TOKEN}"},
                 files=files,
                 timeout=120
             )
