@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-Wall-clock anchored Kaggle MC server.
+Wall-clock anchored Kaggle MC server with auto-cleanup.
 Fires at 00:00 and 12:00 UTC (plus 30-min safety net).
-If a session already started within BOOT_WINDOW_SECONDS of the current
-anchor point, do nothing. Otherwise create a new session.
-This guarantees ZERO drift forever.
+Deletes old sessions, keeps only the 2 most recent.
 """
 
 import os, sys, json, time, textwrap, requests
@@ -16,7 +14,7 @@ AUTH = (USERNAME, KEY)
 BASE = "https://www.kaggle.com/api/v1"
 NOTEBOOK_SLUG = os.environ.get("NOTEBOOK_SLUG", "mc-server-scheduled")
 DATASET_SLUG = os.environ.get("DATASET_SLUG", f"{USERNAME}/mc-server-full-backup")
-BOOT_WINDOW = int(os.environ.get("BOOT_WINDOW_SECONDS", "900"))  # 15 min
+BOOT_WINDOW = int(os.environ.get("BOOT_WINDOW_SECONDS", "900"))
 
 
 def api(method, endpoint, **kwargs):
@@ -25,11 +23,9 @@ def api(method, endpoint, **kwargs):
 
 
 def get_current_anchor():
-    """Return the most recent anchor time (00:00 or 12:00 UTC today)."""
     now = datetime.now(timezone.utc)
     noon_today = now.replace(hour=12, minute=0, second=0, microsecond=0)
     midnight_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-
     if now >= noon_today:
         return noon_today
     else:
@@ -37,7 +33,6 @@ def get_current_anchor():
 
 
 def get_latest_session():
-    """Return (status, ref, created_datetime) of most recent matching session."""
     try:
         resp = api("GET", "kernels/list", params={
             "user": USERNAME, "page": 1, "pageSize": 10, "sortBy": "dateCreated"
@@ -64,6 +59,34 @@ def get_latest_session():
     return None, None, None
 
 
+def cleanup_old_sessions(keep=2):
+    """Delete all old sessions except the N most recent."""
+    try:
+        resp = api("GET", "kernels/list", params={
+            "user": USERNAME, "page": 1, "pageSize": 50, "sortBy": "dateCreated"
+        })
+        if resp.status_code != 200:
+            return
+        kernels = resp.json().get("kernels", [])
+        matching = [
+            k for k in kernels
+            if NOTEBOOK_SLUG in k.get("slug", "")
+            or NOTEBOOK_SLUG in k.get("title", "").lower().replace(" ", "-")
+        ]
+        to_delete = matching[keep:]
+        for k in to_delete:
+            ref = k.get("ref")
+            try:
+                api("DELETE", f"kernels/delete/{ref}")
+                print(f"  🗑️  Deleted old session: {k.get('title')}")
+            except Exception as e:
+                print(f"  ⚠️  Failed to delete {ref}: {e}")
+        if to_delete:
+            print(f"  Cleaned up {len(to_delete)} old sessions, kept {keep}")
+    except Exception as e:
+        print(f"  ⚠️  Cleanup error: {e}")
+
+
 def build_notebook_source():
     env_lines = "\n".join([
         f'os.environ["{k}"] = "{v}"'
@@ -78,7 +101,6 @@ def build_notebook_source():
         }.items()
     ])
 
-    # ─── FULL SERVER CODE WITH SAFE SHUTDOWN ─────────────────────────────────
     server_code = textwrap.dedent(r'''
 import os,sys,time,json,shutil,subprocess,pathlib,textwrap,signal
 
@@ -323,7 +345,7 @@ def main():
 
     status, ref, created_dt = get_latest_session()
 
-    # Check if a session was already created for THIS anchor window
+    # Skip if session already running for this anchor window
     if created_dt and status == "running":
         age_at_anchor = abs((created_dt - anchor).total_seconds())
         if age_at_anchor <= BOOT_WINDOW:
@@ -332,7 +354,7 @@ def main():
             write_summary(msg)
             return
 
-    # Also skip if session is running and started recently (safety net catch)
+    # Skip if session running and started recently (safety net)
     if status == "running" and created_dt:
         age = (now - created_dt).total_seconds()
         if age < BOOT_WINDOW:
@@ -341,11 +363,13 @@ def main():
             write_summary(msg)
             return
 
-    # Need to create a new session
+    # Need new session — clean up old ones first
     reason = f"status={status}" if status else "no session found"
     msg = f"🔄 Creating session for anchor {anchor_label} ({reason})"
     print(msg)
     write_summary(msg)
+
+    cleanup_old_sessions(keep=2)
 
     try:
         new_ref, new_url = create_session(anchor_label)
