@@ -1,31 +1,93 @@
-name: Kaggle MC Scheduled Server
+name: MC Server Keepalive
 
 on:
   schedule:
-    - cron: '0 0 * * *'
-    - cron: '0 12 * * *'
-    - cron: '*/30 * * * *'
+    - cron: '*/3 * * * *'
   workflow_dispatch:
 
-env:
-  KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
-  MINECRAFT_VERSION: "1.21.1"
-  SERVER_MOTD: "Most reliable server you'll ever play on"
-  MAX_PLAYERS: "20"
-  DATASET_SLUG: "ojwojtek/mc-server-full-backup"
-  NOTEBOOK_SLUG: "mc-s-s"
-  BOOT_WINDOW_SECONDS: "900"
-  REPO_NAME: ${{ secrets.REPO_NAME }}
-
 jobs:
-  scheduled-start:
+  keepalive:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: pip install requests
-      - name: Anchor-aligned session manager
-        run: python .github/scripts/scheduled_keepalive.py
-      - run: pip install requests kaggle
+        with:
+          python-version: '3.11'
+
+      - name: Install kaggle
+        run: pip install -q kaggle
+
+      - name: Check and restart kernel
+        id: check
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KERNEL_REF: "ojwojtek/mc-server-code"
+        run: |
+          python3 << 'PYEOF'
+          import subprocess, os, sys, tempfile, shutil
+          from datetime import datetime, timezone
+
+          KERNEL = os.environ["KERNEL_REF"]
+          TOKEN = os.environ["KAGGLE_API_TOKEN"]
+          ENV = {**os.environ, "KAGGLE_API_TOKEN": TOKEN}
+
+          def cmd(c):
+              return subprocess.run(c, capture_output=True, text=True, env=ENV)
+
+          now = datetime.now(timezone.utc)
+
+          # Check status
+          r = cmd(["kaggle", "kernels", "status", KERNEL])
+          status = r.stdout.strip().lower()
+          print(f"[{now.strftime('%H:%M')}] Status: {status}")
+
+          if "running" in status:
+              print("RESULT:already_running")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("result=already_running\n")
+              sys.exit(0)
+
+          # Not running — restart
+          print(f"Not running ({status}), restarting...")
+          d = tempfile.mkdtemp()
+          try:
+              r = cmd(["kaggle", "kernels", "pull", "-p", d, "-m", KERNEL])
+              if r.returncode != 0:
+                  err = r.stderr[:200]
+                  print(f"Pull failed: {err}")
+                  with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                      f.write(f"result=failed\nreason=pull: {err}\n")
+                  sys.exit(1)
+
+              r = cmd(["kaggle", "kernels", "push", "-p", d])
+              if r.returncode != 0:
+                  err = r.stderr[:200]
+                  print(f"Push failed: {err}")
+                  with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                      f.write(f"result=failed\nreason=push: {err}\n")
+                  sys.exit(1)
+
+              print(f"Restarted: {r.stdout.strip()}")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("result=restarted\nreason=\n")
+          finally:
+              shutil.rmtree(d, ignore_errors=True)
+          PYEOF
+
+      - name: Notify on restart
+        if: steps.check.outputs.result == 'restarted'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          curl -s -H "Content-Type: application/json" \
+            -d "{\"content\": \"🟢 **MC Server restarted** — was down, now back up. $(date -u +%H:%M) UTC\"}" \
+            "$DISCORD_WEBHOOK"
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          curl -s -H "Content-Type: application/json" \
+            -d "{\"content\": \"🔴 **MC Server keepalive FAILED** — could not restart! Reason: ${{ steps.check.outputs.reason }} — $(date -u +%H:%M) UTC\"}" \
+            "$DISCORD_WEBHOOK"
