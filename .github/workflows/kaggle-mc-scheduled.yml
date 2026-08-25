@@ -10,10 +10,10 @@ on:
 env:
   KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
   MINECRAFT_VERSION: "1.21.1"
-  SERVER_MOTD: "Martin Kaggle MC Server"
+  SERVER_MOTD: "Most reliable server you'll ever play on"
   MAX_PLAYERS: "20"
-  DATASET_SLUG: "system.pliki/mc-server-full-backup"
-  NOTEBOOK_SLUG: "mc-server-scheduled"
+  DATASET_SLUG: "ojwojtek/mc-server-full-backup"
+  NOTEBOOK_SLUG: "mc-s-s"
   BOOT_WINDOW_SECONDS: "900"
   REPO_NAME: ${{ secrets.REPO_NAME }}
 
