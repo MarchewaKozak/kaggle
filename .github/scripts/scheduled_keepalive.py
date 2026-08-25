@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
 Wall-clock anchored Kaggle MC server with auto-cleanup.
-Fires at 00:00 and 12:00 UTC (plus 30-min safety net).
-Deletes old sessions, keeps only the 2 most recent.
+Uses the CORRECT /api/v1/kernels/push endpoint.
 """
 
-import os, sys, json, time, textwrap, requests
-from datetime import datetime, timezone, timedelta
+import os, sys, json, time, textwrap, requests, tempfile, shutil
+from datetime import datetime, timezone
 
 USERNAME = os.environ["KAGGLE_USERNAME"]
 KEY = os.environ["KAGGLE_KEY"]
@@ -18,7 +17,7 @@ BOOT_WINDOW = int(os.environ.get("BOOT_WINDOW_SECONDS", "900"))
 
 
 def api(method, endpoint, **kwargs):
-    resp = requests.request(method, f"{BASE}/{endpoint}", auth=AUTH, timeout=60, **kwargs)
+    resp = requests.request(method, f"{BASE}/{endpoint}", auth=AUTH, timeout=120, **kwargs)
     return resp
 
 
@@ -60,7 +59,6 @@ def get_latest_session():
 
 
 def cleanup_old_sessions(keep=2):
-    """Delete all old sessions except the N most recent."""
     try:
         resp = api("GET", "kernels/list", params={
             "user": USERNAME, "page": 1, "pageSize": 50, "sortBy": "dateCreated"
@@ -87,7 +85,8 @@ def cleanup_old_sessions(keep=2):
         print(f"  ⚠️  Cleanup error: {e}")
 
 
-def build_notebook_source():
+def build_server_code():
+    """Return the full Python code that runs inside the Kaggle notebook."""
     env_lines = "\n".join([
         f'os.environ["{k}"] = "{v}"'
         for k, v in {
@@ -303,29 +302,78 @@ while True:
  time.sleep(60)
 ''')
 
-    full_code = f"import os\n{env_lines}\n\n{server_code}"
-    return json.dumps({
+    return f"import os\n{env_lines}\n\n{server_code}"
+
+
+def create_session(anchor_label):
+    """
+    Uses the CORRECT Kaggle API: POST /api/v1/kernels/push
+    This requires writing a temporary folder with kernel-metadata.json + .ipynb
+    then calling the push endpoint, exactly like `kaggle kernels push` does.
+    """
+    ts = anchor_label
+    kernel_id = f"{USERNAME}/{NOTEBOOK_SLUG}-{ts}"
+
+    # Build notebook JSON
+    code = build_server_code()
+    notebook = {
         "cells": [{"cell_type": "code", "execution_count": None, "metadata": {},
-                    "outputs": [], "source": full_code.split("\n")}],
+                    "outputs": [], "source": code.split("\n")}],
         "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python",
                                       "name": "python3"},
                       "language_info": {"name": "python", "version": "3.10.0"}},
         "nbformat": 4, "nbformat_minor": 5
-    })
-
-
-def create_session(anchor_label):
-    payload = {
-        "title": f"{NOTEBOOK_SLUG}-{anchor_label}",
-        "enableGpu": False, "enableInternet": True,
-        "datasetSources": [DATASET_SLUG],
-        "language": "python", "isPrivate": True,
-        "source": build_notebook_source()
     }
-    resp = api("POST", "kernels/create", json=payload)
-    resp.raise_for_status()
-    r = resp.json()
-    return r.get("ref"), r.get("url", "")
+
+    # kernel-metadata.json (required by /kernels/push)
+    metadata = {
+        "id": kernel_id,
+        "title": f"{NOTEBOOK_SLUG}-{ts}",
+        "code_file": f"{NOTEBOOK_SLUG}.ipynb",
+        "language": "python",
+        "kernel_type": "notebook",
+        "is_private": True,
+        "enable_gpu": False,
+        "enable_internet": True,
+        "dataset_sources": [DATASET_SLUG],
+        "kernel_sources": [],
+        "competition_sources": []
+    }
+
+    # Write to temp directory and push via API
+    tmpdir = tempfile.mkdtemp()
+    try:
+        nb_path = os.path.join(tmpdir, f"{NOTEBOOK_SLUG}.ipynb")
+        meta_path = os.path.join(tmpdir, "kernel-metadata.json")
+
+        with open(nb_path, "w") as f:
+            json.dump(notebook, f)
+        with open(meta_path, "w") as f:
+            json.dump(metadata, f)
+
+        # Push using multipart form data (same as kaggle CLI)
+        with open(nb_path, "rb") as nb_file, open(meta_path, "rb") as meta_file:
+            files = {
+                "file": (f"{NOTEBOOK_SLUG}.ipynb", nb_file, "application/json"),
+                "metadata": ("kernel-metadata.json", meta_file, "application/json"),
+            }
+            resp = requests.post(
+                f"{BASE}/kernels/push",
+                auth=AUTH,
+                files=files,
+                timeout=120
+            )
+
+        if resp.status_code != 200:
+            raise Exception(f"Push failed ({resp.status_code}): {resp.text[:500]}")
+
+        result = resp.json()
+        ref = result.get("ref", kernel_id)
+        url = result.get("url", f"https://www.kaggle.com/code/{USERNAME}/{NOTEBOOK_SLUG}-{ts}")
+        return ref, url
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def write_summary(msg):
@@ -345,7 +393,6 @@ def main():
 
     status, ref, created_dt = get_latest_session()
 
-    # Skip if session already running for this anchor window
     if created_dt and status == "running":
         age_at_anchor = abs((created_dt - anchor).total_seconds())
         if age_at_anchor <= BOOT_WINDOW:
@@ -354,7 +401,6 @@ def main():
             write_summary(msg)
             return
 
-    # Skip if session running and started recently (safety net)
     if status == "running" and created_dt:
         age = (now - created_dt).total_seconds()
         if age < BOOT_WINDOW:
@@ -363,7 +409,6 @@ def main():
             write_summary(msg)
             return
 
-    # Need new session — clean up old ones first
     reason = f"status={status}" if status else "no session found"
     msg = f"🔄 Creating session for anchor {anchor_label} ({reason})"
     print(msg)
