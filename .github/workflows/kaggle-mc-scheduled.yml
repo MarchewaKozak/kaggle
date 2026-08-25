@@ -27,3 +27,4 @@ jobs:
       - run: pip install requests
       - name: Anchor-aligned session manager
         run: python .github/scripts/scheduled_keepalive.py
+      - run: pip install requests kaggle
