@@ -15,6 +15,7 @@ env:
   DATASET_SLUG: "system.pliki/mc-server-full-backup"
   NOTEBOOK_SLUG: "mc-server-scheduled"
   BOOT_WINDOW_SECONDS: "900"
+  REPO_NAME: ${{ secrets.REPO_NAME }}
 
 jobs:
   scheduled-start:
